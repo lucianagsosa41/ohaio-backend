@@ -1,0 +1,57 @@
+// models/stock.model.js
+const pool = require('../config/db'); // usa el pool correcto
+
+// SELECT normalizado que reutilizamos en todas las lecturas
+const SELECT_NORMALIZADO = `
+  SELECT 
+    s.id,
+    s.hamburguesa_id,
+    h.nombre        AS item,      -- nombre legible
+    s.cantidad::int AS cantidad   -- casteo para JSON prolijo
+  FROM stock s
+  JOIN hamburguesas h ON h.id = s.hamburguesa_id
+`;
+
+async function getAllStock() {
+  const { rows } = await pool.query(`${SELECT_NORMALIZADO} ORDER BY s.id;`);
+  return rows;
+}
+
+async function getStockById(id) {
+  const { rows } = await pool.query(`${SELECT_NORMALIZADO} WHERE s.id = $1;`, [id]);
+  return rows[0];
+}
+
+async function createStock({ hamburguesa_id, cantidad }) {
+  // Insertamos y luego devolvemos el registro normalizado
+  const inserted = await pool.query(
+    'INSERT INTO stock (hamburguesa_id, cantidad) VALUES ($1, $2) RETURNING id;',
+    [hamburguesa_id, cantidad]
+  );
+  const newId = inserted.rows[0].id;
+  const { rows } = await pool.query(`${SELECT_NORMALIZADO} WHERE s.id = $1;`, [newId]);
+  return rows[0];
+}
+
+async function updateStock(id, { cantidad }) {
+  const updated = await pool.query(
+    'UPDATE stock SET cantidad = $1 WHERE id = $2 RETURNING id;',
+    [cantidad, id]
+  );
+  if (updated.rowCount === 0) return null;
+  const { rows } = await pool.query(`${SELECT_NORMALIZADO} WHERE s.id = $1;`, [id]);
+  return rows[0];
+}
+
+async function deleteStock(id) {
+  const deleted = await pool.query('DELETE FROM stock WHERE id = $1 RETURNING id;', [id]);
+  return deleted.rowCount ? { id: Number(id) } : null;
+}
+
+module.exports = {
+  getAllStock,
+  getStockById,
+  createStock,
+  updateStock,
+  deleteStock,
+};

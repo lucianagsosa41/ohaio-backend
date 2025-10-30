@@ -1,0 +1,190 @@
+// controllers/stock.controller.js
+const pool = require('../config/db'); // conexión a la BD
+
+// SELECT normalizado para reutilizar
+const SELECT_NORMALIZADO = `
+  SELECT 
+    s.id,
+    s.hamburguesa_id,
+    h.nombre        AS item,
+    s.cantidad::int AS cantidad
+  FROM stock s
+  JOIN hamburguesas h ON h.id = s.hamburguesa_id
+`;
+
+// GET /api/stock
+const getStock = async (_req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT s.id, s.hamburguesa_id, s.cantidad::int AS cantidad, h.nombre AS item
+      FROM stock s
+      JOIN hamburguesas h ON h.id = s.hamburguesa_id
+      ORDER BY s.id
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error al obtener stock:', error);
+    res.status(500).json({ error: 'Error al obtener stock' });
+  }
+};
+
+// POST /api/stock  { hamburguesa_id, cantidad }
+const addStock = async (req, res) => {
+  const { hamburguesa_id, cantidad } = req.body;
+  if (!hamburguesa_id || !cantidad) {
+    return res.status(400).json({ error: 'hamburguesa_id y cantidad son obligatorios' });
+  }
+  if (typeof cantidad !== 'number' || cantidad <= 0) {
+    return res.status(400).json({ error: 'cantidad debe ser un número positivo' });
+  }
+
+  try {
+    const hamburguesaExiste = await pool.query(
+      'SELECT 1 FROM hamburguesas WHERE id = $1',
+      [hamburguesa_id]
+    );
+    if (hamburguesaExiste.rowCount === 0) {
+      return res.status(404).json({ error: 'Hamburguesa no encontrada' });
+    }
+
+    const inserted = await pool.query(
+      'INSERT INTO stock (hamburguesa_id, cantidad) VALUES ($1, $2) RETURNING id',
+      [hamburguesa_id, cantidad]
+    );
+    const newId = inserted.rows[0].id;
+
+    const { rows } = await pool.query(`${SELECT_NORMALIZADO} WHERE s.id = $1`, [newId]);
+    res.status(201).json(rows[0]);
+  } catch (error) {
+    console.error('Error al agregar stock:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+// PUT /api/stock/:id  { cantidad }
+const updateStock = async (req, res) => {
+  const { id } = req.params;
+  const { cantidad } = req.body;
+
+  if (!cantidad || typeof cantidad !== 'number' || cantidad <= 0) {
+    return res.status(400).json({ error: 'cantidad debe ser un número positivo' });
+  }
+
+  try {
+    const updated = await pool.query(
+      'UPDATE stock SET cantidad = $1 WHERE id = $2 RETURNING id',
+      [cantidad, id]
+    );
+    if (updated.rowCount === 0) {
+      return res.status(404).json({ error: 'Stock no encontrado' });
+    }
+
+    const { rows } = await pool.query(`${SELECT_NORMALIZADO} WHERE s.id = $1`, [id]);
+    res.json(rows[0]);
+  } catch (error) {
+    console.error('Error al actualizar stock:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+// DELETE /api/stock/:id
+const deleteStock = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query('DELETE FROM stock WHERE id = $1 RETURNING id', [id]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Stock no encontrado' });
+    }
+    res.json({ ok: true, deleted: Number(id) });
+  } catch (error) {
+    console.error('Error al eliminar stock:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+// POST /api/stock/by-name  { nombre, cantidad, precio? }
+const addStockByName = async (req, res) => {
+  try {
+    console.log('[by-name] content-type:', req.headers['content-type']);
+    console.log('[by-name] raw body:', req.body);
+
+    const { nombre, cantidad, precio } = req.body || {};
+    const nombreNorm = (nombre || '').trim();
+
+    // normalizamos cantidad y precio (precio opcional, default 0)
+    const cantNum = Number(cantidad);
+    const precioNum = Number(precio ?? 0);
+
+    if (!nombreNorm) {
+      return res.status(400).json({ error: 'nombre es obligatorio' });
+    }
+    if (!Number.isFinite(cantNum) || cantNum <= 0) {
+      return res.status(400).json({ error: 'cantidad debe ser un número positivo' });
+    }
+    if (!Number.isFinite(precioNum) || precioNum < 0) {
+      return res.status(400).json({ error: 'precio debe ser un número >= 0' });
+    }
+
+    // 1) Buscar o crear producto
+    const f = await pool.query(
+      'SELECT id FROM hamburguesas WHERE LOWER(nombre) = LOWER($1)',
+      [nombreNorm]
+    );
+
+    let hamburguesa_id;
+    if (f.rowCount) {
+      hamburguesa_id = f.rows[0].id;
+    } else {
+      // 👇 ahora insertamos también precio (0 por defecto si no lo mandan)
+      const created = await pool.query(
+        'INSERT INTO hamburguesas (nombre, precio) VALUES ($1, $2) RETURNING id',
+        [nombreNorm, precioNum]
+      );
+      hamburguesa_id = created.rows[0].id;
+    }
+
+    // 2) Sumar/crear stock
+    const ex = await pool.query(
+      'SELECT id, cantidad FROM stock WHERE hamburguesa_id = $1',
+      [hamburguesa_id]
+    );
+
+    let stockId;
+    if (ex.rowCount) {
+      const nueva = Number(ex.rows[0].cantidad) + cantNum;
+      const upd = await pool.query(
+        'UPDATE stock SET cantidad = $1 WHERE id = $2 RETURNING id',
+        [nueva, ex.rows[0].id]
+      );
+      stockId = upd.rows[0].id;
+    } else {
+      const ins = await pool.query(
+        'INSERT INTO stock (hamburguesa_id, cantidad) VALUES ($1, $2) RETURNING id',
+        [hamburguesa_id, cantNum]
+      );
+      stockId = ins.rows[0].id;
+    }
+
+    // 3) Devolver normalizado
+    const { rows } = await pool.query(`
+      SELECT s.id, s.hamburguesa_id, h.nombre AS item, s.cantidad::int AS cantidad
+      FROM stock s JOIN hamburguesas h ON h.id = s.hamburguesa_id
+      WHERE s.id = $1
+    `, [stockId]);
+
+    return res.status(201).json(rows[0]);
+  } catch (error) {
+    console.error('Error en addStockByName:', error);
+    return res.status(500).json({ error: 'Error al crear/cargar stock por nombre' });
+  }
+};
+
+
+module.exports = {
+  getStock,
+  addStock,
+  updateStock,
+  deleteStock,
+  addStockByName, // 👈 IMPORTANTE: exportarlo
+};
+

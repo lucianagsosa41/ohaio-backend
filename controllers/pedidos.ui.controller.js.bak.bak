@@ -1,0 +1,157 @@
+const pool = require('../db');
+
+// Utilidades
+const toBool = (v) => String(v || '').trim() !== '';
+const nextMap = {
+  pending: 'preparing',
+  preparing: 'served',
+  served: 'paid',
+  paid: 'paid'
+};
+
+// GET /api/pedidos?search=&estado=
+const getPedidosUI = async (req, res) => {
+  const search = (req.query.search || '').trim();
+  const estado = (req.query.estado || '').trim(); // pending | preparing | served | paid
+
+  try {
+    const params = [];
+    let where = '1=1';
+
+    if (toBool(search)) {
+      params.push(`%${search}%`);
+      where += ` AND (LOWER(cliente) ILIKE LOWER($${params.length}) OR CAST(id AS TEXT) ILIKE LOWER($${params.length}))`;
+    }
+    if (toBool(estado) && ['pending','preparing','served','paid'].includes(estado)) {
+      params.push(estado);
+      where += ` AND estado = $${params.length}`;
+    }
+
+    const q = `
+      SELECT id, cliente, tipo, estado, fecha, hora
+      FROM pedidos
+      WHERE ${where}
+      ORDER BY id DESC
+      LIMIT 200
+    `;
+    const r = await pool.query(q, params);
+    res.json(r.rows);
+  } catch (e) {
+    res.status(500).json({ message: 'Error listando pedidos', error: e.message });
+  }
+};
+
+// PUT /api/pedidos/:id  { cliente?, tipo?, hora? }
+const updatePedido = async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { cliente, tipo, hora } = req.body || {};
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'id inválido' });
+
+  try {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    if (typeof cliente === 'string') { fields.push(`cliente = $${idx++}`); values.push(cliente); }
+    if (typeof tipo === 'string')     { fields.push(`tipo = $${idx++}`); values.push(tipo); }
+    if (typeof hora === 'string')     { fields.push(`hora = $${idx++}`); values.push(hora); }
+
+    if (!fields.length) return res.status(400).json({ message: 'Nada para actualizar' });
+
+    values.push(id);
+    const q = `UPDATE pedidos SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`;
+    const r = await pool.query(q, values);
+    if (!r.rowCount) return res.status(404).json({ message: 'Pedido no existe' });
+
+    res.json(r.rows[0]);
+  } catch (e) {
+    res.status(500).json({ message: 'Error actualizando pedido', error: e.message });
+  }
+};
+
+// DELETE /api/pedidos/:id
+const deletePedido = async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'id inválido' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM detalle_pedidos WHERE pedido_id=$1`, [id]);
+    const r = await client.query(`DELETE FROM pedidos WHERE id=$1`, [id]);
+    await client.query('COMMIT');
+
+    if (!r.rowCount) return res.status(404).json({ message: 'Pedido no existe' });
+    res.json({ ok: true, deleted_id: id });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ message: 'Error eliminando pedido', error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+// PATCH /api/pedidos/:id/next
+const nextEstado = async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'id inválido' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock del pedido
+    const pr = await client.query(`SELECT * FROM pedidos WHERE id=$1 FOR UPDATE`, [id]);
+    const pedido = pr.rows[0];
+    if (!pedido) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Pedido no existe' }); }
+
+    const actual = pedido.estado || 'pending';
+    const siguiente = nextMap[actual] || 'paid';
+    if (actual === 'paid') {
+      await client.query('ROLLBACK');
+      return res.json({ id, estado: 'paid', message: 'Ya está pagado' });
+    }
+
+    // Si el próximo es "paid": validar stock y descontar
+    if (siguiente === 'paid') {
+      const detR = await client.query(
+        `SELECT dp.*, COALESCE(s.cantidad,0) AS stock_qty
+           FROM detalle_pedidos dp
+           LEFT JOIN stock s ON s.hamburguesa_id = dp.hamburguesa_id
+          WHERE dp.pedido_id = $1
+          ORDER BY dp.id`, [id]
+      );
+      const detalles = detR.rows;
+      if (!detalles.length) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'El pedido no tiene ítems' }); }
+
+      for (const d of detalles) {
+        const qty = Number(d.cantidad);
+        if (!Number.isFinite(qty) || qty <= 0) { await client.query('ROLLBACK'); return res.status(400).json({ message: `Cantidad inválida en item #${d.id || ''}` }); }
+        if (Number(d.stock_qty) < qty) { await client.query('ROLLBACK'); return res.status(400).json({ message: `Stock insuficiente en: ${d.descripcion}` }); }
+      }
+      for (const d of detalles) {
+        await client.query(
+          `UPDATE stock SET cantidad = cantidad - $1::int WHERE hamburguesa_id = $2::int`,
+          [Number(d.cantidad), parseInt(d.hamburguesa_id, 10)]
+        );
+      }
+    }
+
+    const ur = await client.query(`UPDATE pedidos SET estado=$2 WHERE id=$1 RETURNING id, estado`, [id, siguiente]);
+
+    await client.query('COMMIT');
+    res.json(ur.rows[0]);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ message: 'Error cambiando estado', error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+module.exports = {
+  getPedidosUI,
+  updatePedido,
+  deletePedido,
+  nextEstado
+};

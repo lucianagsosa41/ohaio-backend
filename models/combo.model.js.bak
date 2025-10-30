@@ -1,0 +1,36 @@
+const pool = require('../db');
+
+const ComboModel = {
+  async getAll() {
+    const result = await pool.query('SELECT * FROM combos');
+    return result.rows;
+  },
+
+  async getById(id) {
+    const result = await pool.query('SELECT * FROM combos WHERE id = $1', [id]);
+    return result.rows[0];
+  },
+
+  async create({ nombre, descripcion, precio }) {
+    const result = await pool.query(
+      'INSERT INTO combos (nombre, descripcion, precio) VALUES ($1, $2, $3) RETURNING *',
+      [nombre, descripcion, precio]
+    );
+    return result.rows[0];
+  },
+
+  async update(id, { nombre, descripcion, precio }) {
+    const result = await pool.query(
+      'UPDATE combos SET nombre = $1, descripcion = $2, precio = $3 WHERE id = $4 RETURNING *',
+      [nombre, descripcion, precio, id]
+    );
+    return result.rows[0];
+  },
+
+  async delete(id) {
+    const result = await pool.query('DELETE FROM combos WHERE id = $1 RETURNING *', [id]);
+    return result.rows[0];
+  }
+};
+
+module.exports = ComboModel;

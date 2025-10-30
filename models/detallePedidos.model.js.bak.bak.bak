@@ -1,0 +1,42 @@
+const pool = require('../config/db');
+
+const createDetallePedido = async ({ pedido_id, hamburguesa_id, cantidad }) => {
+  // casteos y validación temprana
+  const pid = parseInt(pedido_id, 10);
+  const hid = parseInt(hamburguesa_id, 10);
+  const qty = Number(cantidad);
+
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error('pedido_id inválido');
+  if (!Number.isInteger(hid) || hid <= 0) throw new Error('hamburguesa_id inválido');
+  if (!Number.isFinite(qty) || qty <= 0) throw new Error('cantidad inválida');
+
+  const result = await pool.query(
+    `
+    INSERT INTO detalle_pedidos
+      (pedido_id, hamburguesa_id, cantidad, descripcion, precio_unitario, iva)
+    SELECT $1, $2, $3, h.nombre, h.precio, 21
+    FROM hamburguesas h
+    WHERE h.id = $2
+    RETURNING *;
+    `,
+    [pid, hid, qty]
+  );
+
+  if (result.rowCount === 0) {
+    // El SELECT no encontró la hamburguesa
+    throw new Error('La hamburguesa no existe');
+  }
+
+  return result.rows[0];
+};
+
+const getDetalleByPedidoId = async (pedido_id) => {
+  const pid = parseInt(pedido_id, 10);
+  const result = await pool.query(
+    `SELECT * FROM detalle_pedidos WHERE pedido_id = $1 ORDER BY id`,
+    [pid]
+  );
+  return result.rows;
+};
+
+module.exports = { createDetallePedido, getDetalleByPedidoId };

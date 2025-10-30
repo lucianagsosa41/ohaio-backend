@@ -1,0 +1,28 @@
+const db = require('../config/db');
+
+const Combo = {
+  getAll: async () => {
+    const res = await db.query('SELECT * FROM combos WHERE activo = true');
+    return res.rows;
+  },
+
+  getById: async (id) => {
+    const res = await db.query('SELECT * FROM combos WHERE id = $1', [id]);
+    return res.rows[0];
+  },
+
+  create: async ({ nombre, descripcion, precio }) => {
+    const res = await db.query(
+      'INSERT INTO combos (nombre, descripcion, precio) VALUES ($1, $2, $3) RETURNING *',
+      [nombre, descripcion, precio]
+    );
+    return res.rows[0];
+  },
+
+  delete: async (id) => {
+    const res = await db.query('UPDATE combos SET activo = false WHERE id = $1 RETURNING *', [id]);
+    return res.rows[0];
+  },
+};
+
+module.exports = Combo;
